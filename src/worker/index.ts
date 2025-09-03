@@ -390,10 +390,12 @@ async function scrapeFacebookViral(env: Env, query: string, maxResults: number) 
     const data = await response.json() as any;
     console.log(`Found ${data.organic?.length || 0} Facebook results`);
 
-    return (data.organic || []).map((item: any, index: number) => ({
-      id: `fb_${index}`,
-      image_url: item.thumbnail || `https://graph.facebook.com/v12.0/facebook/picture?type=large`,
-      post_url: item.link,
+    return (data.organic || [])
+      .filter((item: any) => item.thumbnail)
+      .map((item: any, index: number) => ({
+        id: `fb_${index}`,
+        image_url: item.thumbnail,
+        post_url: item.link,
       title: item.title || '',
       description: item.snippet || '',
       raw_data: item
@@ -432,7 +434,9 @@ async function searchInstagramWithSerper(env: Env, query: string, maxResults: nu
     }
 
     const data = await response.json() as any;
-    return (data.images || []).map((item: any, index: number) => ({
+    return (data.images || [])
+    .filter((item: any) => item.imageUrl)
+    .map((item: any, index: number) => ({
       id: `ig_serper_${index}`,
       image_url: item.imageUrl,
       post_url: item.link,
