@@ -351,48 +351,10 @@ async function findRealViralImages(env: Env, options: {
     .slice(0, max_images);
 }
 
-// Instagram viral content scraper using Apify
+// Instagram viral content scraper using Serper
 async function scrapeInstagramViral(env: Env, query: string, maxResults: number) {
   console.log(`Scraping Instagram for: ${query}`);
-  
-  try {
-    // Use Apify Instagram hashtag scraper
-    const runInput = {
-      hashtags: [query.replace(/\s+/g, '')],
-      resultsLimit: maxResults,
-      addParentData: false
-    };
-
-    const response = await fetch(`https://api.apify.com/v2/acts/apify~instagram-hashtag-scraper/run-sync-get-dataset-items?token=${env.APIFY_API_KEY}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(runInput),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Apify Instagram scraper failed: ${response.status}`);
-    }
-
-    const data = await response.json() as any[];
-    console.log(`Apify returned ${data.length} Instagram results`);
-
-    return data.map((item: any) => ({
-      id: item.id || item.shortCode,
-      image_url: item.displayUrl || item.thumbnail,
-      post_url: `https://instagram.com/p/${item.shortCode}`,
-      title: item.caption ? item.caption.substring(0, 100) : '',
-      description: item.caption || '',
-      raw_data: item
-    }));
-
-  } catch (error) {
-    console.error('Instagram scraping failed:', error);
-    
-    // Fallback to Serper search
-    return await searchInstagramWithSerper(env, query, maxResults);
-  }
+  return await searchInstagramWithSerper(env, query, maxResults);
 }
 
 // Facebook viral content scraper using Apify

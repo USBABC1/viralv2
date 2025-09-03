@@ -37,7 +37,10 @@ export class ImageDownloader {
       console.log(`📦 Downloaded ${arrayBuffer.byteLength} bytes for: ${filename}`);
 
       // Save the image to R2
-      await this.bucket.put(filename, arrayBuffer);
+      const contentType = response.headers.get('content-type') || 'image/jpeg';
+      await this.bucket.put(filename, arrayBuffer, {
+        httpMetadata: { contentType },
+      });
       
       console.log(`✅ Image saved successfully to R2: ${filename}`);
       return filename;
