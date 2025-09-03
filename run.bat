@@ -6,10 +6,13 @@ echo.
 
 echo Verificando se as dependencias estao instaladas...
 if not exist "node_modules" (
-    echo ERRO: Dependencias nao encontradas!
-    echo Por favor, execute o arquivo install.bat primeiro
-    pause
-    exit /b 1
+    echo Dependencias nao encontradas! Executando o script de instalacao...
+    call install.bat
+    if errorlevel 1 (
+        echo ERRO: Falha na instalacao.
+        pause
+        exit /b 1
+    )
 )
 echo ✓ Dependencias encontradas
 
