@@ -3,12 +3,10 @@ import { cors } from "hono/cors";
 import { zValidator } from "@hono/zod-validator";
 import { SearchRequestSchema, ViralImage, ViralSearch } from "../shared/types";
 import { ImageDownloader } from "../utils/imageDownloader";
-import fs from 'fs/promises';
-import path from 'path';
-import { Buffer } from 'node:buffer';
-import mime from 'mime-types';
 
 interface Env {
+  IMAGES_BUCKET: R2Bucket;
+  SEARCH_KV: KVNamespace;
   SERPER_API_KEY?: string;
   APIFY_API_KEY: string;
   OPENROUTER_API_KEY: string;
@@ -18,28 +16,22 @@ interface Env {
 
 const app = new Hono<{ Bindings: Env }>();
 
-const searchesDir = path.join(process.cwd(), 'data', 'searches');
-fs.mkdir(searchesDir, { recursive: true });
-
-async function getNextId(dir: string): Promise<number> {
-  try {
-    const files = await fs.readdir(dir);
-    const ids = files.map(file => parseInt(path.basename(file, '.json'))).filter(id => !isNaN(id));
-    return ids.length > 0 ? Math.max(...ids) + 1 : 1;
-  } catch {
-    return 1;
-  }
-}
-
 app.use("*", cors());
+
+async function getNextId(kv: KVNamespace, key: string): Promise<number> {
+  const value = await kv.get(key);
+  const id = value ? parseInt(value) : 0;
+  await kv.put(key, (id + 1).toString());
+  return id + 1;
+}
 
 // Real viral image search endpoint
 app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
   const { query, max_images, min_engagement, platforms } = c.req.valid("json");
-  const searchId = await getNextId(searchesDir);
+  const searchId = await getNextId(c.env.SEARCH_KV, 'search_id_counter');
   let imageCounter = 1;
 
-  const searchFilePath = path.join(searchesDir, `${searchId}.json`);
+  const searchKey = `search:${searchId}`;
 
   try {
     // Create search record
@@ -56,7 +48,7 @@ app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
       images: []
     };
 
-    await fs.writeFile(searchFilePath, JSON.stringify(searchData, null, 2));
+    await c.env.SEARCH_KV.put(searchKey, JSON.stringify(searchData));
 
     console.log(`Starting viral search for query: "${query}" with platforms: ${platforms.join(', ')}`);
 
@@ -76,7 +68,7 @@ app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
     searchData.search.completed_at = new Date().toISOString();
     searchData.search.updated_at = new Date().toISOString();
     searchData.images = viralImages;
-    await fs.writeFile(searchFilePath, JSON.stringify(searchData, null, 2));
+    await c.env.SEARCH_KV.put(searchKey, JSON.stringify(searchData));
 
     // Calculate real summary metrics
     const summary = calculateRealSummary(viralImages);
@@ -114,12 +106,14 @@ app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
     
     // Update search status to failed
     try {
-      const searchDataString = await fs.readFile(searchFilePath, 'utf-8');
-      const searchData = JSON.parse(searchDataString);
-      searchData.search.status = 'failed';
-      searchData.search.completed_at = new Date().toISOString();
-      searchData.search.updated_at = new Date().toISOString();
-      await fs.writeFile(searchFilePath, JSON.stringify(searchData, null, 2));
+      const searchDataString = await c.env.SEARCH_KV.get(searchKey);
+      if (searchDataString) {
+        const searchData = JSON.parse(searchDataString);
+        searchData.search.status = 'failed';
+        searchData.search.completed_at = new Date().toISOString();
+        searchData.search.updated_at = new Date().toISOString();
+        await c.env.SEARCH_KV.put(searchKey, JSON.stringify(searchData));
+      }
     } catch (updateError) {
       console.error('Failed to update search status:', updateError);
     }
@@ -139,16 +133,13 @@ app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
 // Get search history
 app.get("/api/searches", async (c) => {
     try {
-        const files = await fs.readdir(searchesDir);
-        const searchPromises = files
-            .filter(file => file.endsWith('.json'))
-            .map(async file => {
-                const filePath = path.join(searchesDir, file);
-                const content = await fs.readFile(filePath, 'utf-8');
-                return JSON.parse(content).search;
-            });
+        const keys = await c.env.SEARCH_KV.list({ prefix: 'search:' });
+        const searchPromises = keys.keys.map(async key => {
+            const content = await c.env.SEARCH_KV.get(key.name);
+            return content ? JSON.parse(content).search : null;
+        });
 
-        const searches = await Promise.all(searchPromises);
+        const searches = (await Promise.all(searchPromises)).filter(s => s !== null);
 
         return c.json(searches
             .sort((a, b) => new Date(b.created_at || '').getTime() - new Date(a.created_at || '').getTime())
@@ -163,10 +154,13 @@ app.get("/api/searches", async (c) => {
 // Get search results by ID
 app.get("/api/search/:id", async (c) => {
   const searchId = c.req.param("id");
-  const searchFilePath = path.join(searchesDir, `${searchId}.json`);
+  const searchKey = `search:${searchId}`;
 
   try {
-    const searchDataString = await fs.readFile(searchFilePath, 'utf-8');
+    const searchDataString = await c.env.SEARCH_KV.get(searchKey);
+    if (!searchDataString) {
+      return c.json({ error: "Search not found" }, 404);
+    }
     const searchData = JSON.parse(searchDataString);
     const summary = calculateRealSummary(searchData.images);
     return c.json({
@@ -181,7 +175,7 @@ app.get("/api/search/:id", async (c) => {
 
 // Get comprehensive image statistics
 app.get("/api/images/stats", async (c) => {
-  const downloader = ImageDownloader.getInstance();
+  const downloader = new ImageDownloader(c.env.IMAGES_BUCKET);
   const downloaderStats = await downloader.getStats();
   
   return c.json({
@@ -197,14 +191,21 @@ app.get("/api/images/stats", async (c) => {
 // Get downloaded image by filename
 app.get("/api/images/:filename", async (c) => {
   const filename = c.req.param("filename");
-  const imagePath = path.join(process.cwd(), 'data', 'images', filename);
 
   try {
-    await fs.access(imagePath);
-    const file = await fs.readFile(imagePath);
-    const contentType = mime.lookup(filename) || 'application/octet-stream';
-    c.header('Content-Type', contentType);
-    return c.body(file);
+    const object = await c.env.IMAGES_BUCKET.get(filename);
+
+    if (object === null) {
+      return c.json({ error: "Image not found" }, 404);
+    }
+
+    const headers = new Headers();
+    object.writeHttpMetadata(headers);
+    headers.set('etag', object.httpEtag);
+
+    return new Response(object.body, {
+      headers,
+    });
   } catch (error) {
     return c.json({ 
       error: "Image not found",
@@ -218,12 +219,11 @@ let totalImagesProcessed = 0;
 let totalImagesValid = 0;
 
 // Download and store images with full data
-async function downloadAndStoreImage(imageUrl: string, filename: string): Promise<string | null> {
+async function downloadAndStoreImage(env: Env, imageUrl: string, filename: string): Promise<string | null> {
   try {
     console.log(`📥 Downloading image ${++totalImagesProcessed}: ${filename}`);
     
-    // Use the ImageDownloader utility
-    const downloader = ImageDownloader.getInstance();
+    const downloader = new ImageDownloader(env.IMAGES_BUCKET);
     const downloadedImagePath = await downloader.downloadImage(imageUrl, filename);
     
     if (downloadedImagePath) {
@@ -290,7 +290,7 @@ async function findRealViralImages(env: Env, options: {
               // Store image reference
               const imageUrl = analysisResult.image_url || image.image_url;
               const filename = `${platform}_${image.id}_${Date.now()}.jpg`;
-              const storedImagePath = await downloadAndStoreImage(imageUrl, filename);
+              const storedImagePath = await downloadAndStoreImage(env, imageUrl, filename);
               
               const viralImage: ViralImage = {
                 id: imageCounter++,
@@ -781,7 +781,7 @@ Focus on realistic metrics based on actual social media engagement patterns.`;
     }
     
     // Return basic fallback analysis with some randomization for variety
-    console.log(`Using fallback AI analysis for post: ${imageData.id}`);
+    console.log(`Using fallback analysis for post: ${imageData.id}`);
     const baseMetrics = {
       estimated_likes: Math.floor(Math.random() * 1000) + 100,
       estimated_comments: Math.floor(Math.random() * 100) + 10,

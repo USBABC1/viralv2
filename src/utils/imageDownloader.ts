@@ -1,37 +1,20 @@
-import fs from 'fs/promises';
-import path from 'path';
-
 // Image downloader utility for local development
 export class ImageDownloader {
-  private static instance: ImageDownloader;
-  private imageDir = path.join(process.cwd(), 'data', 'images');
+  private bucket: R2Bucket;
 
-  private constructor() {
-    // Ensure the image directory exists
-    fs.mkdir(this.imageDir, { recursive: true });
-  }
-
-  static getInstance(): ImageDownloader {
-    if (!ImageDownloader.instance) {
-      ImageDownloader.instance = new ImageDownloader();
-    }
-    return ImageDownloader.instance;
+  constructor(bucket: R2Bucket) {
+    this.bucket = bucket;
   }
 
   async downloadImage(imageUrl: string, filename: string): Promise<string | null> {
-    const filePath = path.join(this.imageDir, filename);
-    const relativePath = path.join('data', 'images', filename);
-
     try {
       console.log(`📥 Starting download: ${filename}`);
       
-      // Check if file already exists
-      try {
-        await fs.access(filePath);
-        console.log(`✅ Image already exists on disk: ${filename}`);
-        return relativePath;
-      } catch {
-        // File doesn't exist, proceed with download
+      // Check if file already exists in R2
+      const existing = await this.bucket.head(filename);
+      if (existing) {
+        console.log(`✅ Image already exists in R2: ${filename}`);
+        return filename;
       }
 
       // Download the image
@@ -50,15 +33,14 @@ export class ImageDownloader {
 
       // Get image data
       const arrayBuffer = await response.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
       
-      console.log(`📦 Downloaded ${buffer.length} bytes for: ${filename}`);
+      console.log(`📦 Downloaded ${arrayBuffer.byteLength} bytes for: ${filename}`);
 
-      // Save the image to the filesystem
-      await fs.writeFile(filePath, buffer);
+      // Save the image to R2
+      await this.bucket.put(filename, arrayBuffer);
       
-      console.log(`✅ Image saved successfully: ${filename}`);
-      return relativePath;
+      console.log(`✅ Image saved successfully to R2: ${filename}`);
+      return filename;
 
     } catch (error) {
       console.error(`💥 Download error for ${filename}:`, error);
@@ -68,13 +50,13 @@ export class ImageDownloader {
 
   async getStats() {
     try {
-      const files = await fs.readdir(this.imageDir);
+      const objects = await this.bucket.list();
       return {
-        total_downloaded: files.length,
-        cached_images: files
+        total_downloaded: objects.objects.length,
+        cached_images: objects.objects.map(obj => obj.key)
       };
     } catch (error) {
-      console.error('Error getting stats:', error);
+      console.error('Error getting stats from R2:', error);
       return {
         total_downloaded: 0,
         cached_images: []
@@ -84,13 +66,12 @@ export class ImageDownloader {
 
   async clearCache() {
     try {
-      const files = await fs.readdir(this.imageDir);
-      for (const file of files) {
-        await fs.unlink(path.join(this.imageDir, file));
-      }
-      console.log('🗑️ Image cache cleared');
+      const objects = await this.bucket.list();
+      const keys = objects.objects.map(obj => obj.key);
+      await this.bucket.delete(keys);
+      console.log('🗑️ R2 cache cleared');
     } catch (error) {
-      console.error('Error clearing cache:', error);
+      console.error('Error clearing R2 cache:', error);
     }
   }
 }

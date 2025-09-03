@@ -3,12 +3,32 @@
   "name": "01990dc2-64d2-7cfe-b38f-bb6feb69e0aa",
   "main": "./src/worker/index.ts",
   "compatibility_date": "2025-06-17",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
   "observability": {
-    "enabled": true,
+    "enabled": true
   },
   "upload_source_maps": true,
   "assets": {
-    "not_found_handling": "single-page-application",
+    "not_found_handling": "single-page-application"
+  },
+  "r2_buckets": [
+    {
+      "binding": "IMAGES_BUCKET",
+      "bucket_name": "images"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "SEARCH_KV",
+      "id": "a8f8ff185a544334b35850a5d21add2b",
+      "preview_id": "a8f8ff185a544334b35850a5d21add2b_preview"
+    }
+  ],
+  "dev": {
+    "ip": "localhost",
+    "port": 7000,
+    "persist": "./data"
   }
 }
