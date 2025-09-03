@@ -1,9 +1,15 @@
+import fs from 'fs/promises';
+import path from 'path';
+
 // Image downloader utility for local development
 export class ImageDownloader {
   private static instance: ImageDownloader;
-  private downloadedImages: Map<string, string> = new Map();
+  private imageDir = path.join(process.cwd(), 'data', 'images');
 
-  private constructor() {}
+  private constructor() {
+    // Ensure the image directory exists
+    fs.mkdir(this.imageDir, { recursive: true });
+  }
 
   static getInstance(): ImageDownloader {
     if (!ImageDownloader.instance) {
@@ -13,13 +19,19 @@ export class ImageDownloader {
   }
 
   async downloadImage(imageUrl: string, filename: string): Promise<string | null> {
+    const filePath = path.join(this.imageDir, filename);
+    const relativePath = path.join('data', 'images', filename);
+
     try {
       console.log(`📥 Starting download: ${filename}`);
       
-      // Check if already downloaded
-      if (this.downloadedImages.has(filename)) {
-        console.log(`✅ Image already cached: ${filename}`);
-        return this.downloadedImages.get(filename)!;
+      // Check if file already exists
+      try {
+        await fs.access(filePath);
+        console.log(`✅ Image already exists on disk: ${filename}`);
+        return relativePath;
+      } catch {
+        // File doesn't exist, proceed with download
       }
 
       // Download the image
@@ -38,19 +50,15 @@ export class ImageDownloader {
 
       // Get image data
       const arrayBuffer = await response.arrayBuffer();
-      const bytes = new Uint8Array(arrayBuffer);
+      const buffer = Buffer.from(arrayBuffer);
       
-      console.log(`📦 Downloaded ${bytes.length} bytes for: ${filename}`);
+      console.log(`📦 Downloaded ${buffer.length} bytes for: ${filename}`);
 
-      // Convert to base64 for storage
-      const base64 = btoa(String.fromCharCode(...bytes));
-      const dataUrl = `data:${response.headers.get('content-type') || 'image/jpeg'};base64,${base64}`;
-
-      // Cache the result
-      this.downloadedImages.set(filename, dataUrl);
+      // Save the image to the filesystem
+      await fs.writeFile(filePath, buffer);
       
-      console.log(`✅ Image cached successfully: ${filename}`);
-      return dataUrl;
+      console.log(`✅ Image saved successfully: ${filename}`);
+      return relativePath;
 
     } catch (error) {
       console.error(`💥 Download error for ${filename}:`, error);
@@ -58,15 +66,31 @@ export class ImageDownloader {
     }
   }
 
-  getStats() {
-    return {
-      total_downloaded: this.downloadedImages.size,
-      cached_images: Array.from(this.downloadedImages.keys())
-    };
+  async getStats() {
+    try {
+      const files = await fs.readdir(this.imageDir);
+      return {
+        total_downloaded: files.length,
+        cached_images: files
+      };
+    } catch (error) {
+      console.error('Error getting stats:', error);
+      return {
+        total_downloaded: 0,
+        cached_images: []
+      };
+    }
   }
 
-  clearCache() {
-    this.downloadedImages.clear();
-    console.log('🗑️ Image cache cleared');
+  async clearCache() {
+    try {
+      const files = await fs.readdir(this.imageDir);
+      for (const file of files) {
+        await fs.unlink(path.join(this.imageDir, file));
+      }
+      console.log('🗑️ Image cache cleared');
+    } catch (error) {
+      console.error('Error clearing cache:', error);
+    }
   }
 }
