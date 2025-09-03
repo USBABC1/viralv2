@@ -1,9 +1,16 @@
+import fs from 'fs/promises';
+import path from 'path';
+import { Buffer } from 'node:buffer';
+
 // Image downloader utility for local development
 export class ImageDownloader {
   private bucket: R2Bucket;
+  private exportDir = path.join(process.cwd(), 'exported_images');
 
   constructor(bucket: R2Bucket) {
     this.bucket = bucket;
+    // Try to create the export directory, ignore error if it already exists
+    fs.mkdir(this.exportDir, { recursive: true }).catch(() => {});
   }
 
   async downloadImage(imageUrl: string, filename: string): Promise<string | null> {
@@ -42,8 +49,17 @@ export class ImageDownloader {
       await this.bucket.put(filename, arrayBuffer, {
         httpMetadata: { contentType },
       });
-      
       console.log(`✅ Image saved successfully to R2: ${filename}`);
+
+      // Also save a copy to the local filesystem for user convenience
+      try {
+        const exportPath = path.join(this.exportDir, filename);
+        await fs.writeFile(exportPath, Buffer.from(arrayBuffer));
+        console.log(`🖼️  Image copy saved to: ${exportPath}`);
+      } catch (fsError) {
+        console.warn(`Could not save image copy to filesystem: ${fsError}`);
+      }
+
       return filename;
 
     } catch (error) {
@@ -74,6 +90,14 @@ export class ImageDownloader {
       const keys = objects.objects.map(obj => obj.key);
       await this.bucket.delete(keys);
       console.log('🗑️ R2 cache cleared');
+
+      // Also clear the exported images directory
+      const files = await fs.readdir(this.exportDir);
+      for (const file of files) {
+        await fs.unlink(path.join(this.exportDir, file));
+      }
+      console.log('🗑️ Exported images directory cleared');
+
     } catch (error) {
       console.error('Error clearing R2 cache:', error);
     }
