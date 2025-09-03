@@ -4,7 +4,7 @@ echo  ViralV1 - Script de Instalacao Completa
 echo ================================================
 echo.
 
-echo [1/3] Verificando se o Node.js esta instalado...
+echo [1/4] Verificando se o Node.js esta instalado...
 node --version >nul 2>&1
 if errorlevel 1 (
     echo ERRO: Node.js nao encontrado!
@@ -15,14 +15,18 @@ if errorlevel 1 (
 echo ✓ Node.js encontrado
 
 echo.
-echo [2/3] Gerando tipos do Cloudflare...
-npm run cf-typegen
+echo [2/4] Verificando se o npm esta instalado...
+npm --version >nul 2>&1
 if errorlevel 1 (
-    echo AVISO: Falha ao gerar tipos do Cloudflare. Tentando continuar...
+    echo ERRO: npm nao encontrado!
+    echo Por favor, reinstale o Node.js
+    pause
+    exit /b 1
 )
+echo ✓ npm encontrado
 
 echo.
-echo [3/3] Instalando dependencias do projeto...
+echo [3/4] Instalando dependencias do projeto...
 echo Isso pode demorar alguns minutos...
 npm install --legacy-peer-deps
 if errorlevel 1 (
@@ -31,6 +35,13 @@ if errorlevel 1 (
     exit /b 1
 )
 echo ✓ Dependencias instaladas com sucesso
+
+echo.
+echo [4/4] Gerando tipos do Cloudflare...
+npm run cf-typegen
+if errorlevel 1 (
+    echo AVISO: Falha ao gerar tipos do Cloudflare (isso e normal em desenvolvimento local)
+)
 
 echo.
 echo ================================================
