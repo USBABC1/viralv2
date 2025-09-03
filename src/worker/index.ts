@@ -377,7 +377,7 @@ async function scrapeFacebookViral(env: Env, query: string, maxResults: number) 
       },
       body: JSON.stringify({
         q: `site:facebook.com "${query}" viral popular engagement`,
-        num: maxResults,
+        n_results: maxResults,
         gl: 'us',
         hl: 'en'
       }),
@@ -422,7 +422,7 @@ async function searchInstagramWithSerper(env: Env, query: string, maxResults: nu
       },
       body: JSON.stringify({
         q: `site:instagram.com "${query}" viral popular`,
-        num: maxResults,
+        n_results: maxResults,
         safe: "off"
       }),
     });
