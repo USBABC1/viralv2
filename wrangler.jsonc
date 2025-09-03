@@ -25,10 +25,5 @@
       "id": "a8f8ff185a544334b35850a5d21add2b",
       "preview_id": "a8f8ff185a544334b35850a5d21add2b_preview"
     }
-  ],
-  "dev": {
-    "ip": "localhost",
-    "port": 7000,
-    "persist": "./data"
-  }
+  ]
 }
