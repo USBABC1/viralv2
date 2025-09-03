@@ -1,4 +1,4 @@
-import { ExternalLink, Heart, MessageCircle, Share, Eye, User, Calendar, Hash } from 'lucide-react';
+import { ExternalLink, Heart, MessageCircle, Share, Eye, User, Calendar, Hash, Download } from 'lucide-react';
 import { ViralImage } from '@/shared/types';
 
 interface ViralImageCardProps {
@@ -143,15 +143,25 @@ export default function ViralImageCard({ image }: ViralImageCardProps) {
             </div>
           )}
           
-          <a
-            href={image.post_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-1 px-3 py-1 bg-slate-100 hover:bg-slate-200 rounded-lg text-sm text-slate-700 transition-colors"
-          >
-            <ExternalLink className="h-3 w-3" />
-            View Post
-          </a>
+          <div className="flex items-center gap-2">
+            <a
+              href={image.image_url}
+              download={image.image_path || 'viral-image.jpg'}
+              className="flex items-center gap-1 px-3 py-1 bg-green-100 hover:bg-green-200 rounded-lg text-sm text-green-700 transition-colors"
+            >
+              <Download className="h-3 w-3" />
+              Download
+            </a>
+            <a
+              href={image.post_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1 px-3 py-1 bg-slate-100 hover:bg-slate-200 rounded-lg text-sm text-slate-700 transition-colors"
+            >
+              <ExternalLink className="h-3 w-3" />
+              View Post
+            </a>
+          </div>
         </div>
       </div>
     </div>
