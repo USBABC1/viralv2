@@ -5,6 +5,8 @@ import { SearchRequestSchema, ViralImage, ViralSearch } from "../shared/types";
 import { ImageDownloader } from "../utils/imageDownloader";
 
 interface Env {
+  IMAGES_BUCKET: R2Bucket;
+  SEARCH_KV: KVNamespace;
   SERPER_API_KEY?: string;
   APIFY_API_KEY: string;
   OPENROUTER_API_KEY: string;
@@ -14,32 +16,39 @@ interface Env {
 
 const app = new Hono<{ Bindings: Env }>();
 
-// In-memory storage for local development
-let searchCounter = 1;
-let imageCounter = 1;
-const searchStorage: Map<number, ViralSearch> = new Map();
-const imageStorage: Map<number, ViralImage[]> = new Map();
-
 app.use("*", cors());
+
+async function getNextId(kv: KVNamespace, key: string): Promise<number> {
+  const value = await kv.get(key);
+  const id = value ? parseInt(value) : 0;
+  await kv.put(key, (id + 1).toString());
+  return id + 1;
+}
 
 // Real viral image search endpoint
 app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
   const { query, max_images, min_engagement, platforms } = c.req.valid("json");
-  const searchId = searchCounter++;
+  const searchId = await getNextId(c.env.SEARCH_KV, 'search_id_counter');
+  let imageCounter = 1;
+
+  const searchKey = `search:${searchId}`;
 
   try {
-    // Create search record in memory
-    const search: ViralSearch = {
-      id: searchId,
-      query,
-      status: 'processing',
-      total_results: 0,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      completed_at: null
+    // Create search record
+    let searchData: { search: ViralSearch, images: ViralImage[] } = {
+      search: {
+        id: searchId,
+        query,
+        status: 'processing',
+        total_results: 0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        completed_at: null
+      },
+      images: []
     };
 
-    searchStorage.set(searchId, search);
+    await c.env.SEARCH_KV.put(searchKey, JSON.stringify(searchData));
 
     console.log(`Starting viral search for query: "${query}" with platforms: ${platforms.join(', ')}`);
 
@@ -49,18 +58,17 @@ app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
       max_images,
       min_engagement,
       platforms,
-      searchId
+      searchId,
+      imageCounter
     });
 
-    // Update search status in memory
-    search.status = 'completed';
-    search.total_results = viralImages.length;
-    search.completed_at = new Date().toISOString();
-    search.updated_at = new Date().toISOString();
-    searchStorage.set(searchId, search);
-
-    // Store images in memory
-    imageStorage.set(searchId, viralImages);
+    // Update search status
+    searchData.search.status = 'completed';
+    searchData.search.total_results = viralImages.length;
+    searchData.search.completed_at = new Date().toISOString();
+    searchData.search.updated_at = new Date().toISOString();
+    searchData.images = viralImages;
+    await c.env.SEARCH_KV.put(searchKey, JSON.stringify(searchData));
 
     // Calculate real summary metrics
     const summary = calculateRealSummary(viralImages);
@@ -74,13 +82,13 @@ app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
     console.log(`======================\n`);
 
     return c.json({
-      search,
+      search: searchData.search,
       images: viralImages,
       summary: {
         ...summary,
         images_processed: totalImagesProcessed,
         images_valid: totalImagesValid,
-        cache_size: imageCache.size
+        cache_size: 0
       }
     });
 
@@ -98,12 +106,13 @@ app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
     
     // Update search status to failed
     try {
-      const search = searchStorage.get(searchId);
-      if (search) {
-        search.status = 'failed';
-        search.completed_at = new Date().toISOString();
-        search.updated_at = new Date().toISOString();
-        searchStorage.set(searchId, search);
+      const searchDataString = await c.env.SEARCH_KV.get(searchKey);
+      if (searchDataString) {
+        const searchData = JSON.parse(searchDataString);
+        searchData.search.status = 'failed';
+        searchData.search.completed_at = new Date().toISOString();
+        searchData.search.updated_at = new Date().toISOString();
+        await c.env.SEARCH_KV.put(searchKey, JSON.stringify(searchData));
       }
     } catch (updateError) {
       console.error('Failed to update search status:', updateError);
@@ -123,40 +132,51 @@ app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
 
 // Get search history
 app.get("/api/searches", async (c) => {
-  const searches = Array.from(searchStorage.values())
-    .sort((a, b) => new Date(b.created_at || '').getTime() - new Date(a.created_at || '').getTime())
-    .slice(0, 20);
+    try {
+        const keys = await c.env.SEARCH_KV.list({ prefix: 'search:' });
+        const searchPromises = keys.keys.map(async key => {
+            const content = await c.env.SEARCH_KV.get(key.name);
+            return content ? JSON.parse(content).search : null;
+        });
 
-  return c.json(searches);
+        const searches = (await Promise.all(searchPromises)).filter(s => s !== null);
+
+        return c.json(searches
+            .sort((a, b) => new Date(b.created_at || '').getTime() - new Date(a.created_at || '').getTime())
+            .slice(0, 20)
+        );
+    } catch (error) {
+        console.error("Error reading search history:", error);
+        return c.json({ error: "Failed to retrieve search history" }, 500);
+    }
 });
 
 // Get search results by ID
 app.get("/api/search/:id", async (c) => {
-  const searchId = parseInt(c.req.param("id"));
+  const searchId = c.req.param("id");
+  const searchKey = `search:${searchId}`;
 
-  const search = searchStorage.get(searchId);
-  if (!search) {
+  try {
+    const searchDataString = await c.env.SEARCH_KV.get(searchKey);
+    if (!searchDataString) {
+      return c.json({ error: "Search not found" }, 404);
+    }
+    const searchData = JSON.parse(searchDataString);
+    const summary = calculateRealSummary(searchData.images);
+    return c.json({
+        search: searchData.search,
+        images: searchData.images,
+        summary
+    });
+  } catch (error) {
     return c.json({ error: "Search not found" }, 404);
   }
-
-  const images = imageStorage.get(searchId) || [];
-  const summary = calculateRealSummary(images);
-
-  return c.json({
-    search,
-    images,
-    summary
-  });
 });
 
 // Get comprehensive image statistics
 app.get("/api/images/stats", async (c) => {
-  const cacheStats = Array.from(imageCache.values());
-  const validImages = cacheStats.filter(img => img.isValid);
-  const totalSize = validImages.reduce((sum, img) => sum + (img.fileSize || 0), 0);
-  
-  const downloader = ImageDownloader.getInstance();
-  const downloaderStats = downloader.getStats();
+  const downloader = new ImageDownloader(c.env.IMAGES_BUCKET);
+  const downloaderStats = await downloader.getStats();
   
   return c.json({
     processing_stats: {
@@ -164,36 +184,29 @@ app.get("/api/images/stats", async (c) => {
       total_valid: totalImagesValid,
       success_rate: totalImagesProcessed > 0 ? ((totalImagesValid / totalImagesProcessed) * 100).toFixed(1) + '%' : '0%'
     },
-    cache_stats: {
-      total_cached: cacheStats.length,
-      valid_in_cache: validImages.length,
-      total_size_bytes: totalSize,
-      total_size_mb: (totalSize / (1024 * 1024)).toFixed(2)
-    },
     downloader_stats: downloaderStats,
-    recent_images: cacheStats.slice(-10).map(img => ({
-      filename: img.filename,
-      is_valid: img.isValid,
-      size_bytes: img.fileSize,
-      downloaded_at: img.downloadedAt
-    }))
   });
 });
 
 // Get downloaded image by filename
 app.get("/api/images/:filename", async (c) => {
   const filename = c.req.param("filename");
-  const downloader = ImageDownloader.getInstance();
-  const stats = downloader.getStats();
-  
-  if (stats.cached_images.includes(filename)) {
-    // In a real implementation, you would serve the actual image file
-    return c.json({ 
-      message: "Image found in cache",
-      filename,
-      available: true 
+
+  try {
+    const object = await c.env.IMAGES_BUCKET.get(filename);
+
+    if (object === null) {
+      return c.json({ error: "Image not found" }, 404);
+    }
+
+    const headers = new Headers();
+    object.writeHttpMetadata(headers);
+    headers.set('etag', object.httpEtag);
+
+    return new Response(object.body, {
+      headers,
     });
-  } else {
+  } catch (error) {
     return c.json({ 
       error: "Image not found",
       filename,
@@ -202,41 +215,21 @@ app.get("/api/images/:filename", async (c) => {
   }
 });
 
-// In-memory image storage with download statistics
-const imageCache = new Map<string, {
-  url: string;
-  filename: string;
-  downloadedAt: string;
-  isValid: boolean;
-  fileSize?: number;
-}>();
-
 let totalImagesProcessed = 0;
 let totalImagesValid = 0;
 
 // Download and store images with full data
-async function downloadAndStoreImage(imageUrl: string, filename: string): Promise<string | null> {
+async function downloadAndStoreImage(env: Env, imageUrl: string, filename: string): Promise<string | null> {
   try {
     console.log(`📥 Downloading image ${++totalImagesProcessed}: ${filename}`);
     
-    // Use the ImageDownloader utility
-    const downloader = ImageDownloader.getInstance();
-    const downloadedImage = await downloader.downloadImage(imageUrl, filename);
+    const downloader = new ImageDownloader(env.IMAGES_BUCKET);
+    const downloadedImagePath = await downloader.downloadImage(imageUrl, filename);
     
-    if (downloadedImage) {
+    if (downloadedImagePath) {
       totalImagesValid++;
       console.log(`✅ Image downloaded (${totalImagesValid}/${totalImagesProcessed}): ${filename}`);
-      
-      // Store in cache
-      imageCache.set(filename, {
-        url: imageUrl,
-        filename,
-        downloadedAt: new Date().toISOString(),
-        isValid: true,
-        fileSize: downloadedImage.length
-      });
-      
-      return downloadedImage; // Return the data URL
+      return downloadedImagePath;
     } else {
       console.log(`❌ Failed to download: ${filename}`);
       return null;
@@ -255,8 +248,10 @@ async function findRealViralImages(env: Env, options: {
   min_engagement: number;
   platforms: string[];
   searchId: number;
+  imageCounter: number;
 }) {
-  const { query, max_images, min_engagement, platforms, searchId } = options;
+  const { query, max_images, min_engagement, platforms, searchId, imageCounter: initialImageCounter } = options;
+  let imageCounter = initialImageCounter;
   console.log(`Finding real viral images for: ${query}`);
 
   const allViralImages: ViralImage[] = [];
@@ -295,12 +290,12 @@ async function findRealViralImages(env: Env, options: {
               // Store image reference
               const imageUrl = analysisResult.image_url || image.image_url;
               const filename = `${platform}_${image.id}_${Date.now()}.jpg`;
-              const storedImageUrl = await downloadAndStoreImage(imageUrl, filename);
+              const storedImagePath = await downloadAndStoreImage(env, imageUrl, filename);
               
               const viralImage: ViralImage = {
                 id: imageCounter++,
                 search_id: searchId,
-                image_url: storedImageUrl || imageUrl,
+                image_url: storedImagePath ? `/api/images/${filename}` : imageUrl,
                 post_url: analysisResult.post_url || image.post_url,
                 platform: platform as 'instagram' | 'facebook',
                 title: analysisResult.title || image.title || 'Viral Content',
@@ -314,7 +309,7 @@ async function findRealViralImages(env: Env, options: {
                 author_followers: analysisResult.author_followers || 0,
                 post_date: analysisResult.post_date || new Date().toISOString(),
                 hashtags: analysisResult.hashtags || [],
-                image_path: filename,
+                image_path: storedImagePath,
                 screenshot_path: null,
                 created_at: new Date().toISOString(),
                 updated_at: new Date().toISOString()
@@ -356,48 +351,10 @@ async function findRealViralImages(env: Env, options: {
     .slice(0, max_images);
 }
 
-// Instagram viral content scraper using Apify
+// Instagram viral content scraper using Serper
 async function scrapeInstagramViral(env: Env, query: string, maxResults: number) {
   console.log(`Scraping Instagram for: ${query}`);
-  
-  try {
-    // Use Apify Instagram hashtag scraper
-    const runInput = {
-      hashtags: [query.replace(/\s+/g, '')],
-      resultsLimit: maxResults,
-      addParentData: false
-    };
-
-    const response = await fetch(`https://api.apify.com/v2/acts/apify~instagram-hashtag-scraper/run-sync-get-dataset-items?token=${env.APIFY_API_KEY}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(runInput),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Apify Instagram scraper failed: ${response.status}`);
-    }
-
-    const data = await response.json() as any[];
-    console.log(`Apify returned ${data.length} Instagram results`);
-
-    return data.map((item: any) => ({
-      id: item.id || item.shortCode,
-      image_url: item.displayUrl || item.thumbnail,
-      post_url: `https://instagram.com/p/${item.shortCode}`,
-      title: item.caption ? item.caption.substring(0, 100) : '',
-      description: item.caption || '',
-      raw_data: item
-    }));
-
-  } catch (error) {
-    console.error('Instagram scraping failed:', error);
-    
-    // Fallback to Serper search
-    return await searchInstagramWithSerper(env, query, maxResults);
-  }
+  return await searchInstagramWithSerper(env, query, maxResults);
 }
 
 // Facebook viral content scraper using Apify
@@ -420,7 +377,7 @@ async function scrapeFacebookViral(env: Env, query: string, maxResults: number) 
       },
       body: JSON.stringify({
         q: `site:facebook.com "${query}" viral popular engagement`,
-        num: maxResults,
+        n_results: maxResults,
         gl: 'us',
         hl: 'en'
       }),
@@ -433,10 +390,12 @@ async function scrapeFacebookViral(env: Env, query: string, maxResults: number) 
     const data = await response.json() as any;
     console.log(`Found ${data.organic?.length || 0} Facebook results`);
 
-    return (data.organic || []).map((item: any, index: number) => ({
-      id: `fb_${index}`,
-      image_url: item.thumbnail || `https://graph.facebook.com/v12.0/facebook/picture?type=large`,
-      post_url: item.link,
+    return (data.organic || [])
+      .filter((item: any) => item.thumbnail)
+      .map((item: any, index: number) => ({
+        id: `fb_${index}`,
+        image_url: item.thumbnail,
+        post_url: item.link,
       title: item.title || '',
       description: item.snippet || '',
       raw_data: item
@@ -465,7 +424,7 @@ async function searchInstagramWithSerper(env: Env, query: string, maxResults: nu
       },
       body: JSON.stringify({
         q: `site:instagram.com "${query}" viral popular`,
-        num: maxResults,
+        n_results: maxResults,
         safe: "off"
       }),
     });
@@ -475,7 +434,9 @@ async function searchInstagramWithSerper(env: Env, query: string, maxResults: nu
     }
 
     const data = await response.json() as any;
-    return (data.images || []).map((item: any, index: number) => ({
+    return (data.images || [])
+    .filter((item: any) => item.imageUrl)
+    .map((item: any, index: number) => ({
       id: `ig_serper_${index}`,
       image_url: item.imageUrl,
       post_url: item.link,
@@ -786,7 +747,7 @@ Focus on realistic metrics based on actual social media engagement patterns.`;
     }
     
     // Return basic fallback analysis with some randomization for variety
-    console.log(`Using fallback AI analysis for post: ${imageData.id}`);
+    console.log(`Using fallback analysis for post: ${imageData.id}`);
     const baseMetrics = {
       estimated_likes: Math.floor(Math.random() * 1000) + 100,
       estimated_comments: Math.floor(Math.random() * 100) + 10,

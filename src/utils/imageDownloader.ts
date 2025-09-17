@@ -1,28 +1,24 @@
 // Image downloader utility for local development
 export class ImageDownloader {
-  private static instance: ImageDownloader;
-  private downloadedImages: Map<string, string> = new Map();
+  private bucket: R2Bucket;
 
-  private constructor() {}
-
-  static getInstance(): ImageDownloader {
-    if (!ImageDownloader.instance) {
-      ImageDownloader.instance = new ImageDownloader();
-    }
-    return ImageDownloader.instance;
+  constructor(bucket: R2Bucket) {
+    this.bucket = bucket;
   }
 
   async downloadImage(imageUrl: string, filename: string): Promise<string | null> {
     try {
       console.log(`📥 Starting download: ${filename}`);
       
-      // Check if already downloaded
-      if (this.downloadedImages.has(filename)) {
-        console.log(`✅ Image already cached: ${filename}`);
-        return this.downloadedImages.get(filename)!;
+      // Check if file already exists in R2
+      const existing = await this.bucket.head(filename);
+      if (existing) {
+        console.log(`✅ Image already exists in R2: ${filename}`);
+        return filename;
       }
 
       // Download the image
+      console.log(`Fetching image from: ${imageUrl}`);
       const response = await fetch(imageUrl, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -38,19 +34,17 @@ export class ImageDownloader {
 
       // Get image data
       const arrayBuffer = await response.arrayBuffer();
-      const bytes = new Uint8Array(arrayBuffer);
       
-      console.log(`📦 Downloaded ${bytes.length} bytes for: ${filename}`);
+      console.log(`📦 Downloaded ${arrayBuffer.byteLength} bytes for: ${filename}`);
 
-      // Convert to base64 for storage
-      const base64 = btoa(String.fromCharCode(...bytes));
-      const dataUrl = `data:${response.headers.get('content-type') || 'image/jpeg'};base64,${base64}`;
+      // Save the image to R2
+      const contentType = response.headers.get('content-type') || 'image/jpeg';
+      await this.bucket.put(filename, arrayBuffer, {
+        httpMetadata: { contentType },
+      });
 
-      // Cache the result
-      this.downloadedImages.set(filename, dataUrl);
-      
-      console.log(`✅ Image cached successfully: ${filename}`);
-      return dataUrl;
+      console.log(`✅ Image saved successfully to R2: ${filename}`);
+      return filename;
 
     } catch (error) {
       console.error(`💥 Download error for ${filename}:`, error);
@@ -58,15 +52,30 @@ export class ImageDownloader {
     }
   }
 
-  getStats() {
-    return {
-      total_downloaded: this.downloadedImages.size,
-      cached_images: Array.from(this.downloadedImages.keys())
-    };
+  async getStats() {
+    try {
+      const objects = await this.bucket.list();
+      return {
+        total_downloaded: objects.objects.length,
+        cached_images: objects.objects.map(obj => obj.key)
+      };
+    } catch (error) {
+      console.error('Error getting stats from R2:', error);
+      return {
+        total_downloaded: 0,
+        cached_images: []
+      };
+    }
   }
 
-  clearCache() {
-    this.downloadedImages.clear();
-    console.log('🗑️ Image cache cleared');
+  async clearCache() {
+    try {
+      const objects = await this.bucket.list();
+      const keys = objects.objects.map(obj => obj.key);
+      await this.bucket.delete(keys);
+      console.log('🗑️ R2 cache cleared');
+    } catch (error) {
+      console.error('Error clearing R2 cache:', error);
+    }
   }
 }
